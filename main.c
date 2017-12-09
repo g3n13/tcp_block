@@ -20,6 +20,55 @@ typedef struct ethhdr
 }ethhdr;
 #pragma pack(pop)
 
+u_short ip_sum_calc(u_short len_ip_header, u_short * buff )
+{
+        u_short word16;
+        u_int sum = 0;
+        u_short i;
+        
+	for( i = 0; i < len_ip_header; i = i+2 )
+        {
+                word16 = ( ( buff[i]<<8) & 0xFF00 )+( buff[i+1] & 0xFF );
+                sum = sum + (u_int) word16;
+        }
+        while( sum >> 16 )
+                sum = ( sum & 0xFFFF ) + ( sum >> 16 );
+        sum = ~sum;
+       
+        return ((u_short) sum);
+}
+
+struct pseudo_header{
+	uint32_t source_address;
+	uint32_t dest_address;
+	uint8_t placeholder;
+	uint8_t protocol;
+	uint16_t tcp_length;
+};
+
+uint16_t tcp_check(uint16_t *ptr,int nbytes) {
+        register long sum;
+        unsigned short oddbyte;
+        register short answer;
+ 
+        sum=0;
+        while(nbytes>1) {
+                sum+=*ptr++;
+                nbytes-=2;
+        }
+        if(nbytes==1) {
+                oddbyte=0;
+                *((uint8_t*)&oddbyte)=*(uint8_t*)ptr;
+                sum+=oddbyte;
+        }
+ 
+        sum = (sum>>16)+(sum & 0xffff);
+        sum = sum + (sum>>16);
+        answer=(uint16_t)~sum;
+       
+        return(answer);
+}
+
 int main(int argc, char* argv[]) {
   
   char* dev = argv[1];
@@ -46,6 +95,7 @@ int main(int argc, char* argv[]) {
     u_int tcp_sport;
     u_int tcp_dport;
     int tmp;
+    uint8_t* tmp_char;
 
     u_int size_ip;
     u_short size_tcp;
@@ -73,6 +123,11 @@ int main(int argc, char* argv[]) {
 		printf("   * Invalid IP header length: %u bytes\n", size_ip);
 		return -1;
     	}
+	//ip_checksum
+	ip_hdr->ip_sum=0;
+	uint16_t ipdata[20];
+	for(int i=0;i<20;i++)ipdata[i]=*(uint8_t*)ip_hdr++;
+	ip_hdr->ip_sum=htons(ip_sum_calc(20,ipdata));
     }
     else
 	continue;
@@ -96,6 +151,22 @@ int main(int argc, char* argv[]) {
 	size = SIZE_ETHERNET+size_ip+size_tcp;
 	uint8_t* s_packet = (uint8_t*)malloc(size*sizeof(uint8_t));
 	printf("%d\n", size);
+
+	//tcp_checksum
+	t_hdr->th_sum=0;
+	struct pseudo_header *psh=(struct pseudo_header*)malloc(sizeof(struct pseudo_header));
+	psh->source_address=inet_addr(inet_ntoa(ip_hdr->ip_src));
+	psh->dest_address=inet_addr(inet_ntoa(ip_hdr->ip_dst));
+	psh->placeholder=0;//reserved
+	psh->protocol=6;//protocol number for tcp
+	psh->tcp_length=htons(size_tcp);
+	
+	uint8_t *seudo=(uint8_t*)malloc(sizeof(struct pseudo_header)+size_tcp);
+	memcpy(seudo,psh,sizeof(struct pseudo_header));
+	memcpy(seudo+sizeof(struct pseudo_header),t_hdr,size_tcp);
+	uint16_t checksum=tcp_check((uint16_t*)seudo,sizeof(struct pseudo_header)+size_tcp);
+	t_hdr->th_sum=checksum;
+
 	memcpy(ether_hdr + SIZE_ETHERNET + size_ip, t_hdr, size_tcp);
 	
 	//new packet-change only flag
@@ -121,6 +192,26 @@ int main(int argc, char* argv[]) {
 	tmp = t_hdr->th_seq;
 	t_hdr->th_seq = t_hdr->th_ack;
 	t_hdr->th_ack = tmp;
+
+	//ip_checksum
+        ip_hdr->ip_sum=0;
+        uint16_t ipdata[20];
+        for(int i=0;i<20;i++)ipdata[i]=*(uint8_t*)ip_hdr++;
+        ip_hdr->ip_sum=htons(ip_sum_calc(20,ipdata));
+
+	//tcp_checksum
+        t_hdr->th_sum=0;
+        psh->source_address=inet_addr(inet_ntoa(ip_hdr->ip_src));
+	psh->dest_address=inet_addr(inet_ntoa(ip_hdr->ip_dst));
+        psh->placeholder=0;//reserved
+        psh->protocol=6;//protocol number for tcp
+        psh->tcp_length=htons(size_tcp);
+
+        memcpy(seudo,psh,sizeof(struct pseudo_header));
+        memcpy(seudo+sizeof(struct pseudo_header),t_hdr,size_tcp);
+        checksum=tcp_check((uint16_t*)seudo,sizeof(struct pseudo_header)+size_tcp);
+        t_hdr->th_sum=checksum;
+
 	memcpy(s_packet, ether_hdr, size*sizeof(uint8_t));
 	
 	if(pcap_sendpacket(handle, s_packet, size))
